@@ -3659,8 +3659,30 @@ namespace plume {
         assert(commandLists != nullptr);
         assert(commandListCount > 0);
 
+        auto signalFailureFence = [signalFence]() {
+            if (signalFence != nullptr) {
+                dispatch_semaphore_signal(static_cast<MetalCommandFence *>(signalFence)->semaphore);
+            }
+        };
+
+        if (commandLists == nullptr || commandListCount == 0 || mtl == nullptr) {
+            signalFailureFence();
+            return;
+        }
+
+        for (uint32_t i = 0; i < commandListCount; i++) {
+            if (commandLists[i] == nullptr) {
+                signalFailureFence();
+                return;
+            }
+        }
+
         // Create a new command buffer to encode the wait semaphores into
         MTL::CommandBuffer* cmdBuffer = mtl->commandBufferWithUnretainedReferences();
+        if (cmdBuffer == nullptr) {
+            signalFailureFence();
+            return;
+        }
         cmdBuffer->setLabel(MTLSTR("Wait Command Buffer"));
         cmdBuffer->enqueue();
 
@@ -3674,8 +3696,6 @@ namespace plume {
         // Commit all command lists except the last one
 
         for (uint32_t i = 0; i < commandListCount - 1; i++) {
-            assert(commandLists[i] != nullptr);
-
             const MetalCommandList *interfaceCommandList = static_cast<const MetalCommandList *>(commandLists[i]);
             MetalCommandList *mutableCommandList = const_cast<MetalCommandList*>(interfaceCommandList);
             mutableCommandList->mtl->enqueue();
