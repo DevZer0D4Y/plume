@@ -238,7 +238,8 @@ namespace plume {
         uint32_t height = 0;
         uint32_t refreshRate = 0;
         std::vector<MetalDrawable> drawables;
-        uint32_t currentAvailableDrawableIndex = 0;
+        std::atomic<uint32_t> currentAvailableDrawableIndex = 0;
+        uint32_t drawableCount = 0;
         RenderWindow renderWindow = {};
         std::unique_ptr<CocoaWindow> windowWrapper;
 
@@ -664,19 +665,19 @@ namespace plume {
         MetalInterface *renderInterface = nullptr;
         RenderDeviceCapabilities capabilities;
         RenderDeviceDescription description;
-        bool supportsResidencySets;
+        bool supportsResidencySets = false;
 
         // Resolve functionality
-        MTL::ComputePipelineState *resolveTexturePipelineState;
+        MTL::ComputePipelineState *resolveTexturePipelineState = nullptr;
 
         // Clear functionality
-        MTL::Function* clearVertexFunction;
-        MTL::Function* clearColorFunction;
-        MTL::Function* clearDepthFunction;
-        MTL::Function* clearStencilFunction;
-        MTL::DepthStencilState *clearDepthState;
-        MTL::DepthStencilState *clearStencilState;
-        MTL::DepthStencilState *clearDepthStencilState;
+        MTL::Function* clearVertexFunction = nullptr;
+        MTL::Function* clearColorFunction = nullptr;
+        MTL::Function* clearDepthFunction = nullptr;
+        MTL::Function* clearStencilFunction = nullptr;
+        MTL::DepthStencilState *clearDepthState = nullptr;
+        MTL::DepthStencilState *clearStencilState = nullptr;
+        MTL::DepthStencilState *clearDepthStencilState = nullptr;
 
         std::mutex clearPipelineStateMutex;
         std::unordered_map<uint64_t, MTL::RenderPipelineState *> clearRenderPipelineStates;

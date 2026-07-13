@@ -22,7 +22,8 @@
 namespace plume {
     // MARK: - Constants
 
-    static constexpr size_t MAX_DRAWABLES = 3;
+    static constexpr uint32_t MIN_DRAWABLES = 2;
+    static constexpr uint32_t MAX_DRAWABLES = 3;
     static constexpr size_t DESCRIPTOR_SETS_BINDING_INDEX = 0;
     static constexpr size_t PUSH_CONSTANTS_BINDING_INDEX = DESCRIPTOR_SETS_BINDING_INDEX + MAX_DESCRIPTOR_SET_BINDINGS;
     static constexpr size_t VERTEX_BUFFERS_BINDING_INDEX = PUSH_CONSTANTS_BINDING_INDEX + MAX_PUSH_CONSTANT_BINDINGS;
@@ -1851,7 +1852,9 @@ namespace plume {
     }
 
     MetalDrawable::~MetalDrawable() {
-        mtl->release();
+        if (mtl != nullptr) {
+            mtl->release();
+        }
     }
 
     std::unique_ptr<RenderTextureView> MetalDrawable::createTextureView(const RenderTextureViewDesc& desc) const {
@@ -1867,14 +1870,21 @@ namespace plume {
 
     MetalSwapChain::MetalSwapChain(MetalCommandQueue *commandQueue, const RenderWindow renderWindow, uint32_t textureCount, const RenderFormat format, uint32_t maxFrameLatency) {
         this->layer = static_cast<CA::MetalLayer*>(renderWindow.view);
+        if (layer == nullptr) {
+            return;
+        }
+
         layer->setDevice(commandQueue->device->mtl);
         layer->setPixelFormat(mapPixelFormat(format));
 
         this->commandQueue = commandQueue;
-        this->maxFrameLatency = maxFrameLatency;
+        this->drawableCount = std::clamp(textureCount, MIN_DRAWABLES, MAX_DRAWABLES);
+        this->maxFrameLatency = std::clamp(maxFrameLatency, 1U, drawableCount);
+#if PLUME_IOS
+        setMetalLayerDrawableCount(layer, drawableCount);
+#endif
 
-        // Metal supports a maximum of 3 drawables.
-        this->drawables.resize(MAX_DRAWABLES);
+        this->drawables.resize(drawableCount);
 
         this->renderWindow = renderWindow;
         this->windowWrapper = std::make_unique<CocoaWindow>(renderWindow.window);
@@ -1886,7 +1896,7 @@ namespace plume {
         }
 
         // set each of the drawable to have desc.flags = RenderTextureFlag::RENDER_TARGET;
-        for (uint32_t i = 0; i < MAX_DRAWABLES; i++) {
+        for (uint32_t i = 0; i < drawableCount; i++) {
             MetalDrawable &drawable = this->drawables[i];
             drawable.desc.width = width;
             drawable.desc.height = height;
@@ -1896,14 +1906,24 @@ namespace plume {
     }
 
     MetalSwapChain::~MetalSwapChain() {
+        std::unique_lock lock(lastPresentedIdMutex);
+        lastPresentedIdCondVar.wait(lock, [this] {
+            return lastPresentedId >= currentPresentId;
+        });
     }
 
     bool MetalSwapChain::present(const uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, const uint32_t waitSemaphoreCount) {
-        assert(layer != nullptr && "Cannot present without a valid layer.");
+        if (layer == nullptr || textureIndex >= drawables.size()) {
+            return false;
+        }
+
         NS::AutoreleasePool *releasePool = NS::AutoreleasePool::alloc()->init();
 
         const MetalDrawable &drawable = drawables[textureIndex];
-        assert(drawable.mtl != nullptr && "Cannot present without a valid drawable.");
+        if (drawable.mtl == nullptr) {
+            releasePool->release();
+            return false;
+        }
 
         // Create a new command buffer just for presenting
         MTL::CommandBuffer *presentBuffer = commandQueue->mtl->commandBufferWithUnretainedReferences();
@@ -1924,8 +1944,8 @@ namespace plume {
             drawableMtl->present();
         });
 
-        presentBuffer->addCompletedHandler([drawableMtl, presentId, this](MTL::CommandBuffer* cmdBuffer) {
-            currentAvailableDrawableIndex = (currentAvailableDrawableIndex + 1) % MAX_DRAWABLES;
+        presentBuffer->addCompletedHandler([drawableMtl, presentId, textureIndex, this](MTL::CommandBuffer* cmdBuffer) {
+            currentAvailableDrawableIndex.store((textureIndex + 1) % drawableCount, std::memory_order_release);
             drawableMtl->release();
 
             {
@@ -1952,6 +1972,10 @@ namespace plume {
     }
 
     bool MetalSwapChain::resize() {
+        if (layer == nullptr || windowWrapper == nullptr) {
+            return false;
+        }
+
         getWindowSize(width, height);
 
         if (width == 0 || height == 0) {
@@ -1962,7 +1986,7 @@ namespace plume {
         if (const CGSize current = layer->drawableSize(); !CGSizeEqualToSize(current, drawableSize)) {
             layer->setDrawableSize(drawableSize);
 
-            for (uint32_t i = 0; i < MAX_DRAWABLES; i++) {
+            for (uint32_t i = 0; i < drawableCount; i++) {
                 MetalDrawable &drawable = drawables[i];
                 drawable.desc.width = width;
                 drawable.desc.height = height;
@@ -1973,17 +1997,37 @@ namespace plume {
     }
 
     bool MetalSwapChain::needsResize() const {
+        if (layer == nullptr || windowWrapper == nullptr) {
+            return true;
+        }
+
         uint32_t windowWidth, windowHeight;
         getWindowSize(windowWidth, windowHeight);
-        return (layer == nullptr) || (width != windowWidth) || (height != windowHeight);
+        return (width != windowWidth) || (height != windowHeight);
     }
 
     void MetalSwapChain::setVsyncEnabled(const bool vsyncEnabled) {
+        if (layer == nullptr) {
+            return;
+        }
+
+#if PLUME_IOS
+        (void)vsyncEnabled;
+#else
         layer->setDisplaySyncEnabled(vsyncEnabled);
+#endif
     }
 
     bool MetalSwapChain::isVsyncEnabled() const {
+        if (layer == nullptr) {
+            return false;
+        }
+
+#if PLUME_IOS
+        return true;
+#else
         return layer->displaySyncEnabled();
+#endif
     }
 
     uint32_t MetalSwapChain::getWidth() const {
@@ -1995,13 +2039,16 @@ namespace plume {
     }
 
     RenderTexture *MetalSwapChain::getTexture(const uint32_t textureIndex) {
+        assert(textureIndex < drawables.size());
         return &drawables[textureIndex];
     }
 
     bool MetalSwapChain::acquireTexture(RenderCommandSemaphore *signalSemaphore, uint32_t *textureIndex) {
         assert(signalSemaphore != nullptr);
         assert(textureIndex != nullptr);
-        assert(*textureIndex < MAX_DRAWABLES);
+        if (layer == nullptr || drawableCount == 0) {
+            return false;
+        }
 
         NS::AutoreleasePool *releasePool = NS::AutoreleasePool::alloc()->init();
 
@@ -2016,12 +2063,14 @@ namespace plume {
         CA::MetalDrawable *nextDrawable = layer->nextDrawable();
         if (nextDrawable == nullptr) {
             fprintf(stderr, "No more drawables available for rendering.\n");
+            releasePool->release();
             return false;
         }
 
         // Set the texture index and drawable data
-        *textureIndex = currentAvailableDrawableIndex;
-        MetalDrawable &drawable = drawables[currentAvailableDrawableIndex];
+        const uint32_t drawableIndex = currentAvailableDrawableIndex.load(std::memory_order_acquire);
+        *textureIndex = drawableIndex;
+        MetalDrawable &drawable = drawables[drawableIndex];
         drawable.desc.width = width;
         drawable.desc.height = height;
         drawable.desc.flags = RenderTextureFlag::RENDER_TARGET;
@@ -2039,7 +2088,7 @@ namespace plume {
     }
 
     uint32_t MetalSwapChain::getTextureCount() const {
-        return MAX_DRAWABLES;
+        return drawableCount;
     }
 
     RenderWindow MetalSwapChain::getWindow() const {
@@ -2051,10 +2100,16 @@ namespace plume {
     }
 
     uint32_t MetalSwapChain::getRefreshRate() const {
-        return windowWrapper->getRefreshRate();
+        return windowWrapper != nullptr ? windowWrapper->getRefreshRate() : 0;
     }
 
     void MetalSwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
+        if (windowWrapper == nullptr) {
+            dstWidth = 0;
+            dstHeight = 0;
+            return;
+        }
+
         CocoaWindowAttributes attributes;
         windowWrapper->getWindowAttributes(&attributes);
         dstWidth = attributes.width;
@@ -3683,6 +3738,10 @@ namespace plume {
         this->renderInterface = renderInterface;
 
         // Device Selection
+#if PLUME_IOS
+        (void)preferredDeviceName;
+        mtl = MTL::CreateSystemDefaultDevice();
+#else
         const NS::Array* devices = MTL::CopyAllDevices();
         MTL::Device *preferredDevice = nullptr;
         for (NS::UInteger i = 0; i < devices->count(); i++) {
@@ -3694,12 +3753,23 @@ namespace plume {
             }
         }
 
-        mtl = preferredDevice ? preferredDevice : MTL::CreateSystemDefaultDevice();;
+        mtl = preferredDevice ? preferredDevice->retain() : MTL::CreateSystemDefaultDevice();
+        devices->release();
+#endif
+        if (mtl == nullptr) {
+            return;
+        }
+
         const std::string deviceName(mtl->name()->utf8String());
         description.name = deviceName;
+#if PLUME_IOS
+        description.type = RenderDeviceType::INTEGRATED;
+        description.vendor = RenderDeviceVendor::APPLE;
+#else
         description.type = mapDeviceType(mtl->location());
-        description.driverVersion = 1; // Unavailable
         description.vendor = mtl->supportsFamily(MTL::GPUFamilyApple1) ? RenderDeviceVendor::APPLE : getRenderDeviceVendor(mtl->registryID());
+#endif
+        description.driverVersion = 1; // Unavailable
         description.dedicatedVideoMemory = mtl->recommendedMaxWorkingSetSize();
 
         timestampCounterSet = findTimestampCounterSet();
@@ -3749,17 +3819,25 @@ namespace plume {
     }
 
     MetalDevice::~MetalDevice() {
-        mtl->release();
-
-        for (const auto& [key, state] : clearRenderPipelineStates) {
-            state->release();
+        if (mtl != nullptr) {
+            mtl->release();
         }
 
-        resolveTexturePipelineState->release();
-        clearVertexFunction->release();
-        clearColorFunction->release();
-        clearDepthFunction->release();
-        sharedBlitDescriptor->release();
+        for (const auto& [key, state] : clearRenderPipelineStates) {
+            if (state != nullptr) {
+                state->release();
+            }
+        }
+
+        if (resolveTexturePipelineState != nullptr) resolveTexturePipelineState->release();
+        if (clearVertexFunction != nullptr) clearVertexFunction->release();
+        if (clearColorFunction != nullptr) clearColorFunction->release();
+        if (clearDepthFunction != nullptr) clearDepthFunction->release();
+        if (clearStencilFunction != nullptr) clearStencilFunction->release();
+        if (clearDepthState != nullptr) clearDepthState->release();
+        if (clearStencilState != nullptr) clearStencilState->release();
+        if (clearDepthStencilState != nullptr) clearDepthStencilState->release();
+        if (sharedBlitDescriptor != nullptr) sharedBlitDescriptor->release();
 
         if (gpuAddressableResidencySet != nullptr) {
             gpuAddressableResidencySet->endResidency();
@@ -4048,11 +4126,20 @@ namespace plume {
         releasePool->release();
 
         // Fill device names.
+#if PLUME_IOS
+        MTL::Device* device = MTL::CreateSystemDefaultDevice();
+        if (device != nullptr) {
+            deviceNames.push_back(std::string(device->name()->utf8String()));
+            device->release();
+        }
+#else
         const NS::Array* devices = MTL::CopyAllDevices();
         for (NS::UInteger i = 0; i < devices->count(); i++) {
             NS::String* deviceName = ((MTL::Device *)devices->object(i))->name();
             deviceNames.push_back(std::string(deviceName->utf8String()));
         }
+        devices->release();
+#endif
     }
 
     MetalInterface::~MetalInterface() {}
@@ -4072,7 +4159,7 @@ namespace plume {
     }
 
     bool MetalInterface::isValid() const {
-        return true;
+        return !deviceNames.empty();
     }
 
     // Global creation function.

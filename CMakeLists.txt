@@ -103,6 +103,19 @@ if(APPLE)
     target_include_directories(plume PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/contrib/metal-cpp
     )
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR IOS)
+        find_library(PLUME_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        find_library(PLUME_METAL_FRAMEWORK Metal REQUIRED)
+        find_library(PLUME_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+        find_library(PLUME_UIKIT_FRAMEWORK UIKit REQUIRED)
+        target_link_libraries(plume PUBLIC
+            ${PLUME_FOUNDATION_FRAMEWORK}
+            ${PLUME_METAL_FRAMEWORK}
+            ${PLUME_QUARTZCORE_FRAMEWORK}
+            ${PLUME_UIKIT_FRAMEWORK}
+        )
+    endif()
 endif()
 
 # Add examples if requested
