@@ -1906,9 +1906,10 @@ namespace plume {
     }
 
     MetalSwapChain::~MetalSwapChain() {
+        const uint64_t finalPresentId = currentPresentId.load(std::memory_order_acquire);
         std::unique_lock lock(lastPresentedIdMutex);
-        lastPresentedIdCondVar.wait(lock, [this] {
-            return lastPresentedId >= currentPresentId;
+        lastPresentedIdCondVar.wait(lock, [this, finalPresentId] {
+            return lastPresentedId >= finalPresentId;
         });
     }
 
@@ -1927,6 +1928,11 @@ namespace plume {
 
         // Create a new command buffer just for presenting
         MTL::CommandBuffer *presentBuffer = commandQueue->mtl->commandBufferWithUnretainedReferences();
+        if (presentBuffer == nullptr) {
+            releasePool->release();
+            return false;
+        }
+
         presentBuffer->setLabel(MTLSTR("Present Command Buffer"));
         presentBuffer->enqueue();
 
@@ -1935,7 +1941,7 @@ namespace plume {
             presentBuffer->encodeWait(interfaceSemaphore->mtl, interfaceSemaphore->mtlEventValue++);
         }
 
-        const uint64_t presentId = ++currentPresentId;
+        const uint64_t presentId = currentPresentId.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         // According to Apple, presenting via scheduled handler is more performant than using the presentDrawable method.
         // We grab the underlying drawable because we might've acquired a new one by now and the old one would have been released.
@@ -1963,10 +1969,11 @@ namespace plume {
     }
 
     void MetalSwapChain::wait() {
-        if (currentPresentId >= maxFrameLatency) {
+        const uint64_t presentId = currentPresentId.load(std::memory_order_acquire);
+        if (presentId >= maxFrameLatency) {
             std::unique_lock lock(lastPresentedIdMutex);
-            lastPresentedIdCondVar.wait_for(lock, std::chrono::seconds(1), [this] {
-                return lastPresentedId >= currentPresentId - (maxFrameLatency - 1);
+            lastPresentedIdCondVar.wait_for(lock, std::chrono::seconds(1), [this, presentId] {
+                return lastPresentedId >= presentId - (maxFrameLatency - 1);
             });
         }
     }
@@ -2054,6 +2061,11 @@ namespace plume {
 
         // Create a command buffer just to encode the signal
         MTL::CommandBuffer *acquireBuffer = commandQueue->mtl->commandBufferWithUnretainedReferences();
+        if (acquireBuffer == nullptr) {
+            releasePool->release();
+            return false;
+        }
+
         acquireBuffer->setLabel(MTLSTR("Acquire Drawable Command Buffer"));
         const MetalCommandSemaphore *interfaceSemaphore = static_cast<MetalCommandSemaphore *>(signalSemaphore);
         acquireBuffer->enqueue();
@@ -2062,7 +2074,9 @@ namespace plume {
 
         CA::MetalDrawable *nextDrawable = layer->nextDrawable();
         if (nextDrawable == nullptr) {
+#if !defined(NDEBUG)
             fprintf(stderr, "No more drawables available for rendering.\n");
+#endif
             releasePool->release();
             return false;
         }
