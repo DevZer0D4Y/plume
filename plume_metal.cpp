@@ -4241,7 +4241,7 @@ namespace plume {
             device->release();
         }
 #else
-        const NS::Array* devices = MTL::CopyAllDevices();
+        NS::Array* devices = MTL::CopyAllDevices();
         for (NS::UInteger i = 0; i < devices->count(); i++) {
             NS::String* deviceName = ((MTL::Device *)devices->object(i))->name();
             deviceNames.push_back(std::string(deviceName->utf8String()));
