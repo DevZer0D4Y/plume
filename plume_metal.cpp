@@ -3869,7 +3869,16 @@ namespace plume {
         description.vendor = mtl->supportsFamily(MTL::GPUFamilyApple1) ? RenderDeviceVendor::APPLE : getRenderDeviceVendor(mtl->registryID());
 #endif
         description.driverVersion = 1; // Unavailable
+#if PLUME_IOS
+        // recommendedMaxWorkingSetSize is only available starting with iOS 16. Memory is always unified otherwise.
+        if (NS::ProcessInfo::processInfo()->operatingSystemVersion().majorVersion >= 16) {
+            description.dedicatedVideoMemory = mtl->recommendedMaxWorkingSetSize();
+        } else {
+            description.dedicatedVideoMemory = NS::ProcessInfo::processInfo()->physicalMemory();
+        }
+#else
         description.dedicatedVideoMemory = mtl->recommendedMaxWorkingSetSize();
+#endif
 
         timestampCounterSet = findTimestampCounterSet();
         if (timestampCounterSet != nullptr) {
@@ -3892,7 +3901,7 @@ namespace plume {
         capabilities.resolveModes = false;
         capabilities.scalarBlockLayout = true;
         capabilities.presentWait = true;
-        capabilities.preferHDR = mtl->recommendedMaxWorkingSetSize() > (512 * 1024 * 1024);
+        capabilities.preferHDR = description.dedicatedVideoMemory > (512 * 1024 * 1024);
         capabilities.dynamicDepthBias = true;
         capabilities.uma = mtl->hasUnifiedMemory();
         capabilities.gpuUploadHeap = capabilities.uma;
